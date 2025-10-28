@@ -1,0 +1,137 @@
+name: Save All PDFs
+
+# Trigger the workflow manually or on schedule
+on:
+  workflow_dispatch:  # Allows manual trigger from GitHub Actions tab
+  schedule:
+    - cron: '0 0 * * 0'  # Runs weekly on Sunday at midnight UTC
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - '**/*.pdf'  # Only trigger when PDF files are added/modified
+
+jobs:
+  save-pdfs:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for complete repository
+
+      - name: Find all PDF files
+        id: find-pdfs
+        run: |
+          echo "Finding all PDF files in repository..."
+          find . -type f -name "*.pdf" -not -path "./.git/*" > pdf_list.txt
+          PDF_COUNT=$(wc -l < pdf_list.txt)
+          echo "Found $PDF_COUNT PDF files"
+          echo "pdf_count=$PDF_COUNT" >> $GITHUB_OUTPUT
+
+          # Display first 20 PDFs found
+          echo "First 20 PDFs found:"
+          head -20 pdf_list.txt
+
+      - name: Create PDF archive directory
+        run: |
+          mkdir -p pdf_archive
+          echo "Created pdf_archive directory"
+
+      - name: Copy all PDFs to archive
+        run: |
+          echo "Copying PDFs to archive directory..."
+          while IFS= read -r pdf_file; do
+            # Create subdirectory structure in archive
+            pdf_dir=$(dirname "$pdf_file")
+            mkdir -p "pdf_archive/$pdf_dir"
+            cp "$pdf_file" "pdf_archive/$pdf_file"
+            echo "Copied: $pdf_file"
+          done < pdf_list.txt
+
+          echo "All PDFs copied successfully!"
+
+      - name: Create compressed archive
+        run: |
+          echo "Creating compressed archive of all PDFs..."
+          tar -czf all-pdfs-$(date +%Y%m%d-%H%M%S).tar.gz -C pdf_archive .
+          ls -lh all-pdfs-*.tar.gz
+
+      - name: Generate PDF inventory report
+        run: |
+          echo "# PDF Inventory Report" > pdf_report.md
+          echo "" >> pdf_report.md
+          echo "**Generated:** $(date '+%Y-%m-%d %H:%M:%S UTC')" >> pdf_report.md
+          echo "" >> pdf_report.md
+          echo "**Total PDFs Found:** ${{ steps.find-pdfs.outputs.pdf_count }}" >> pdf_report.md
+          echo "" >> pdf_report.md
+          echo "## PDF Files by Directory" >> pdf_report.md
+          echo "" >> pdf_report.md
+
+          # Group PDFs by directory
+          while IFS= read -r pdf_file; do
+            echo "- \`$pdf_file\`" >> pdf_report.md
+          done < pdf_list.txt
+
+          echo "" >> pdf_report.md
+          echo "## Statistics" >> pdf_report.md
+          echo "" >> pdf_report.md
+
+          # Calculate total size
+          TOTAL_SIZE=$(find . -type f -name "*.pdf" -not -path "./.git/*" -exec du -cb {} + | grep total | awk '{print $1}')
+          TOTAL_SIZE_MB=$(echo "scale=2; $TOTAL_SIZE / 1048576" | bc)
+          echo "**Total Size:** ${TOTAL_SIZE_MB} MB" >> pdf_report.md
+
+          # Count by directory
+          echo "" >> pdf_report.md
+          echo "### PDFs by Directory" >> pdf_report.md
+          echo "" >> pdf_report.md
+          find . -type f -name "*.pdf" -not -path "./.git/*" | sed 's|/[^/]*$||' | sort | uniq -c | sort -rn | awk '{print "- **" $1 "** PDFs in \`" substr($0, index($0,$2)) "\`"}' >> pdf_report.md
+
+          cat pdf_report.md
+
+      - name: Upload PDFs as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: all-pdfs-${{ github.run_number }}
+          path: |
+            all-pdfs-*.tar.gz
+            pdf_report.md
+            pdf_list.txt
+          retention-days: 90  # Keep artifacts for 90 days
+
+      - name: Upload PDF archive to release (optional)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "To create a release with PDFs, uncomment the release step below"
+          echo "Archive created: $(ls all-pdfs-*.tar.gz)"
+
+      # Uncomment below to automatically create a GitHub release with PDFs
+      # - name: Create Release with PDFs
+      #   if: github.event_name == 'workflow_dispatch'
+      #   uses: softprops/action-gh-release@v1
+      #   with:
+      #     tag_name: pdf-backup-${{ github.run_number }}
+      #     name: PDF Backup - ${{ github.run_number }}
+      #     body_path: pdf_report.md
+      #     files: |
+      #       all-pdfs-*.tar.gz
+      #       pdf_list.txt
+      #   env:
+      #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "## PDF Save Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Successfully saved **${{ steps.find-pdfs.outputs.pdf_count }}** PDF files!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Archive Details" >> $GITHUB_STEP_SUMMARY
+          echo "- **Archive File:** \`$(ls all-pdfs-*.tar.gz)\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Archive Size:** $(ls -lh all-pdfs-*.tar.gz | awk '{print $5}')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Download" >> $GITHUB_STEP_SUMMARY
+          echo "The PDF archive is available as a workflow artifact." >> $GITHUB_STEP_SUMMARY
+          echo "Go to the 'Artifacts' section of this workflow run to download it." >> $GITHUB_STEP_SUMMARY
