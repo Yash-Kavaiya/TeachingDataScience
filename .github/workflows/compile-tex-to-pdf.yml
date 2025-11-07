@@ -1,0 +1,190 @@
+name: Compile TEX to PDF
+
+# Trigger the workflow manually, on push, or on schedule
+on:
+  workflow_dispatch:  # Allows manual trigger from GitHub Actions tab
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - '**/*.tex'  # Only trigger when .tex files are modified
+  schedule:
+    - cron: '0 2 * * 1'  # Runs weekly on Monday at 2 AM UTC
+
+jobs:
+  compile-tex:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for complete repository
+
+      - name: Install LaTeX
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y texlive-latex-extra texlive-fonts-recommended texlive-fonts-extra texlive-xetex latexmk
+
+      - name: Find all TEX files
+        id: find-tex
+        run: |
+          echo "Finding all .tex files in repository..."
+          find . -type f -name "*.tex" -not -path "./.git/*" > tex_list.txt
+          TEX_COUNT=$(wc -l < tex_list.txt)
+          echo "Found $TEX_COUNT .tex files"
+          echo "tex_count=$TEX_COUNT" >> $GITHUB_OUTPUT
+
+          # Display first 20 TEX files found
+          echo "First 20 .tex files found:"
+          head -20 tex_list.txt
+
+      - name: Create output directory
+        run: |
+          mkdir -p compiled_pdfs
+          echo "Created compiled_pdfs directory"
+
+      - name: Compile TEX files to PDF
+        id: compile
+        run: |
+          echo "Compiling .tex files to PDF..."
+          SUCCESS_COUNT=0
+          FAILURE_COUNT=0
+          FAILED_FILES=""
+
+          while IFS= read -r tex_file; do
+            echo "----------------------------------------"
+            echo "Processing: $tex_file"
+
+            # Get directory and filename
+            tex_dir=$(dirname "$tex_file")
+            tex_base=$(basename "$tex_file" .tex)
+
+            # Create corresponding output directory
+            output_dir="compiled_pdfs/$tex_dir"
+            mkdir -p "$output_dir"
+
+            # Try to compile the .tex file
+            # Using pdflatex with error handling
+            cd "$tex_dir"
+
+            if pdflatex -interaction=nonstopmode -halt-on-error "$tex_base.tex" > /dev/null 2>&1; then
+              # Run twice to resolve references
+              pdflatex -interaction=nonstopmode -halt-on-error "$tex_base.tex" > /dev/null 2>&1 || true
+
+              # Check if PDF was created
+              if [ -f "$tex_base.pdf" ]; then
+                # Move PDF to output directory
+                cd - > /dev/null
+                cp "$tex_dir/$tex_base.pdf" "$output_dir/"
+                echo "✓ SUCCESS: $tex_file -> $output_dir/$tex_base.pdf"
+                SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+              else
+                cd - > /dev/null
+                echo "✗ FAILED: $tex_file (PDF not generated)"
+                FAILURE_COUNT=$((FAILURE_COUNT + 1))
+                FAILED_FILES="$FAILED_FILES\n- $tex_file"
+              fi
+            else
+              cd - > /dev/null
+              echo "✗ FAILED: $tex_file (compilation error)"
+              FAILURE_COUNT=$((FAILURE_COUNT + 1))
+              FAILED_FILES="$FAILED_FILES\n- $tex_file"
+            fi
+
+          done < tex_list.txt
+
+          echo "----------------------------------------"
+          echo "Compilation Summary:"
+          echo "  Successful: $SUCCESS_COUNT"
+          echo "  Failed: $FAILURE_COUNT"
+
+          echo "success_count=$SUCCESS_COUNT" >> $GITHUB_OUTPUT
+          echo "failure_count=$FAILURE_COUNT" >> $GITHUB_OUTPUT
+          echo "failed_files<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$FAILED_FILES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Count generated PDFs
+        id: count-pdfs
+        run: |
+          PDF_COUNT=$(find compiled_pdfs -type f -name "*.pdf" | wc -l)
+          echo "Generated $PDF_COUNT PDF files"
+          echo "pdf_count=$PDF_COUNT" >> $GITHUB_OUTPUT
+
+      - name: Create compressed archive
+        if: steps.count-pdfs.outputs.pdf_count > 0
+        run: |
+          echo "Creating compressed archive of all generated PDFs..."
+          tar -czf compiled-pdfs-$(date +%Y%m%d-%H%M%S).tar.gz -C compiled_pdfs .
+          ls -lh compiled-pdfs-*.tar.gz
+
+      - name: Generate compilation report
+        run: |
+          echo "# TEX to PDF Compilation Report" > compilation_report.md
+          echo "" >> compilation_report.md
+          echo "**Generated:** $(date '+%Y-%m-%d %H:%M:%S UTC')" >> compilation_report.md
+          echo "" >> compilation_report.md
+          echo "## Summary" >> compilation_report.md
+          echo "" >> compilation_report.md
+          echo "- **Total .tex files found:** ${{ steps.find-tex.outputs.tex_count }}" >> compilation_report.md
+          echo "- **Successfully compiled:** ${{ steps.compile.outputs.success_count }}" >> compilation_report.md
+          echo "- **Failed to compile:** ${{ steps.compile.outputs.failure_count }}" >> compilation_report.md
+          echo "- **PDF files generated:** ${{ steps.count-pdfs.outputs.pdf_count }}" >> compilation_report.md
+          echo "" >> compilation_report.md
+
+          if [ "${{ steps.compile.outputs.failure_count }}" -gt 0 ]; then
+            echo "## Failed Compilations" >> compilation_report.md
+            echo "" >> compilation_report.md
+            echo "${{ steps.compile.outputs.failed_files }}" >> compilation_report.md
+            echo "" >> compilation_report.md
+          fi
+
+          echo "## Generated PDF Files" >> compilation_report.md
+          echo "" >> compilation_report.md
+          find compiled_pdfs -type f -name "*.pdf" | sort | while read pdf; do
+            echo "- \`$pdf\`" >> compilation_report.md
+          done
+
+          cat compilation_report.md
+
+      - name: Upload compiled PDFs as artifact
+        if: steps.count-pdfs.outputs.pdf_count > 0
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-pdfs-${{ github.run_number }}
+          path: |
+            compiled-pdfs-*.tar.gz
+            compilation_report.md
+            compiled_pdfs/
+          retention-days: 90  # Keep artifacts for 90 days
+
+      - name: Upload compilation report
+        uses: actions/upload-artifact@v4
+        with:
+          name: compilation-report-${{ github.run_number }}
+          path: compilation_report.md
+          retention-days: 30
+
+      - name: Summary
+        run: |
+          echo "## TEX to PDF Compilation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Results" >> $GITHUB_STEP_SUMMARY
+          echo "- ✓ **Successfully compiled:** ${{ steps.compile.outputs.success_count }} files" >> $GITHUB_STEP_SUMMARY
+          echo "- ✗ **Failed:** ${{ steps.compile.outputs.failure_count }} files" >> $GITHUB_STEP_SUMMARY
+          echo "- 📄 **Total PDFs generated:** ${{ steps.count-pdfs.outputs.pdf_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ steps.count-pdfs.outputs.pdf_count }}" -gt 0 ]; then
+            echo "### Archive Details" >> $GITHUB_STEP_SUMMARY
+            echo "- **Archive File:** \`$(ls compiled-pdfs-*.tar.gz 2>/dev/null || echo 'N/A')\`" >> $GITHUB_STEP_SUMMARY
+            if [ -f compiled-pdfs-*.tar.gz ]; then
+              echo "- **Archive Size:** $(ls -lh compiled-pdfs-*.tar.gz | awk '{print $5}')" >> $GITHUB_STEP_SUMMARY
+            fi
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Download" >> $GITHUB_STEP_SUMMARY
+            echo "The compiled PDFs are available as workflow artifacts." >> $GITHUB_STEP_SUMMARY
+            echo "Go to the 'Artifacts' section of this workflow run to download them." >> $GITHUB_STEP_SUMMARY
+          fi
